@@ -1,6 +1,0 @@
-{
-  "name": "HeartCraft",
-  "description": "A romantic surprise website builder with glassmorphism UI, theme customization, love letters, music, photos, and interactive memory counters.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
