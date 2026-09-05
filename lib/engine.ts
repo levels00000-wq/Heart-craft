@@ -76,7 +76,17 @@ export class MazeEngine {
   private moveT = 0
   private heldDir: Dir | null = null
   private pendingDir: Dir | null = null
+  private moveVelocity = 0
+  private facing: Dir = "down"
+  private facingAngle = Math.PI / 2
   private portalCd = 0
+  private inputBuffer: Dir[] = []
+  private readonly maxInputBuffer = 4
+  private cameraX = 0
+  private cameraY = 0
+  private cameraZoom = 1
+  private targetZoom = 1
+  private particles: Array<{ x: number; y: number; vx: number; vy: number; life: number; color: string }> = []
 
   // gameplay
   private timeLeft: number
@@ -151,8 +161,10 @@ export class MazeEngine {
     this.ro.observe(this.canvas)
     window.addEventListener("keydown", this.onKeyDown)
     window.addEventListener("keyup", this.onKeyUp)
-    this.canvas.addEventListener("pointerdown", this.onPointerDown)
-    this.canvas.addEventListener("pointerup", this.onPointerUp)
+    this.canvas.addEventListener("pointerdown", this.onPointerDown, { passive: false })
+    this.canvas.addEventListener("pointermove", this.onPointerMove, { passive: false })
+    this.canvas.addEventListener("pointerup", this.onPointerUp, { passive: false })
+    this.canvas.addEventListener("pointercancel", this.onPointerCancel, { passive: false })
     this.running = true
     this.last = performance.now()
     this.raf = requestAnimationFrame(this.loop)
@@ -166,7 +178,9 @@ export class MazeEngine {
     window.removeEventListener("keydown", this.onKeyDown)
     window.removeEventListener("keyup", this.onKeyUp)
     this.canvas.removeEventListener("pointerdown", this.onPointerDown)
+    this.canvas.removeEventListener("pointermove", this.onPointerMove)
     this.canvas.removeEventListener("pointerup", this.onPointerUp)
+    this.canvas.removeEventListener("pointercancel", this.onPointerCancel)
   }
 
   setPaused(p: boolean) {
@@ -176,6 +190,8 @@ export class MazeEngine {
 
   setDir(dir: Dir) {
     this.heldDir = dir
+    this.inputBuffer = [dir, ...this.inputBuffer.filter((queued) => queued !== dir)].slice(0, this.maxInputBuffer)
+    this.facing = dir
     this.pendingDir = dir // guarantees at least one step per tap
   }
 
@@ -233,18 +249,35 @@ export class MazeEngine {
     this.clearDir(map[e.key])
   }
 
-  private pStart: { x: number; y: number } | null = null
+  private pStart: { x: number; y: number; id: number } | null = null
   private onPointerDown = (e: PointerEvent) => {
-    this.pStart = { x: e.clientX, y: e.clientY }
+    e.preventDefault()
+    this.canvas.setPointerCapture?.(e.pointerId)
+    this.pStart = { x: e.clientX, y: e.clientY, id: e.pointerId }
+  }
+  private onPointerMove = (e: PointerEvent) => {
+    if (!this.pStart || this.pStart.id !== e.pointerId) return
+    e.preventDefault()
+    const dx = e.clientX - this.pStart.x
+    const dy = e.clientY - this.pStart.y
+    if (Math.max(Math.abs(dx), Math.abs(dy)) < 24) return
+    const dir = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? "right" : "left") : (dy > 0 ? "down" : "up")
+    this.setDir(dir)
+    this.pStart = { x: e.clientX, y: e.clientY, id: e.pointerId }
   }
   private onPointerUp = (e: PointerEvent) => {
-    if (!this.pStart) return
+    if (!this.pStart || this.pStart.id !== e.pointerId) return
+    e.preventDefault()
     const dx = e.clientX - this.pStart.x
     const dy = e.clientY - this.pStart.y
     this.pStart = null
-    if (Math.abs(dx) < 18 && Math.abs(dy) < 18) return
+    if (Math.max(Math.abs(dx), Math.abs(dy)) < 18) return
     if (Math.abs(dx) > Math.abs(dy)) this.setDir(dx > 0 ? "right" : "left")
     else this.setDir(dy > 0 ? "down" : "up")
+  }
+  private onPointerCancel = () => {
+    this.pStart = null
+    this.clearDir()
   }
 
   // ---------- view ----------
@@ -257,6 +290,10 @@ export class MazeEngine {
     this.canvas.height = Math.floor(this.cssH * this.dpr)
     this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0)
     this.cell = clamp(Math.floor(Math.min(this.cssW, this.cssH) / 8), 26, 60)
+    const maxX = Math.max(0, this.maze.width * this.cell - this.cssW)
+    const maxY = Math.max(0, this.maze.height * this.cell - this.cssH)
+    this.cameraX = clamp((this.px + 0.5) * this.cell - this.cssW / 2, 0, maxX)
+    this.cameraY = clamp((this.py + 0.5) * this.cell - this.cssH / 2, 0, maxY)
   }
 
   // ---------- collisions ----------
@@ -313,10 +350,14 @@ export class MazeEngine {
       return
     }
 
-    // movement
-    const dur = this.speedTimer > 0 ? BASE_MOVE * 0.55 : BASE_MOVE
+    // Movement uses a spring-like acceleration curve while retaining the
+    // original cell-based collision and progression model.
+    const targetDuration = this.speedTimer > 0 ? BASE_MOVE * 0.55 : BASE_MOVE
+    const targetVelocity = 1 / targetDuration
+    const acceleration = 22
+    this.moveVelocity += (targetVelocity - this.moveVelocity) * Math.min(1, acceleration * dt)
     if (this.moving) {
-      this.moveT += dt / dur
+      this.moveT += dt * this.moveVelocity
       if (this.moveT >= 1) {
         this.moveT = 0
         this.moving = false
@@ -349,9 +390,10 @@ export class MazeEngine {
 
   private tryNext() {
     if (this.moving) return
-    const dir = this.heldDir ?? this.pendingDir
+    const dir = this.heldDir ?? this.inputBuffer[0] ?? this.pendingDir
     if (!dir) return
     const started = this.tryStart(dir)
+    if (started) this.inputBuffer = this.inputBuffer.filter((queued) => queued !== dir)
     // Consume a queued tap once it moves, or drop it if it was blocked with no
     // active hold, so the player never lurches unexpectedly later.
     if (started || this.heldDir !== dir) this.pendingDir = null
@@ -372,8 +414,10 @@ export class MazeEngine {
     this.fromY = this.py
     this.px = nx
     this.py = ny
+    this.facing = dir
     this.moving = true
     this.moveT = 0
+    this.moveVelocity = Math.max(this.moveVelocity, 3.5)
     sound.play("step")
     return true
   }
@@ -525,8 +569,13 @@ export class MazeEngine {
     const rx = this.renderX()
     const ry = this.renderY()
 
-    let camX = worldW <= this.cssW ? (worldW - this.cssW) / 2 : clamp((rx + 0.5) * cell - this.cssW / 2, 0, worldW - this.cssW)
-    let camY = worldH <= this.cssH ? (worldH - this.cssH) / 2 : clamp((ry + 0.5) * cell - this.cssH / 2, 0, worldH - this.cssH)
+    const targetCamX = worldW <= this.cssW ? (worldW - this.cssW) / 2 : clamp((rx + 0.5) * cell - this.cssW / 2, 0, worldW - this.cssW)
+    const targetCamY = worldH <= this.cssH ? (worldH - this.cssH) / 2 : clamp((ry + 0.5) * cell - this.cssH / 2, 0, worldH - this.cssH)
+    this.cameraX += (targetCamX - this.cameraX) * 0.18
+    this.cameraY += (targetCamY - this.cameraY) * 0.18
+    this.cameraZoom += (this.targetZoom - this.cameraZoom) * 0.12
+    let camX = this.cameraX
+    let camY = this.cameraY
 
     if (this.shake > 0) {
       camX += (Math.random() - 0.5) * 8

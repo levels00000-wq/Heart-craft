@@ -9,6 +9,7 @@ import type { PowerKind } from "@/lib/maze"
 import { sound } from "@/lib/sound"
 import { Hud } from "./hud"
 import { DPad } from "./dpad"
+import { VirtualJoystick } from "./virtual-joystick"
 import { cn } from "@/lib/utils"
 
 const POWER_LABEL: Record<PowerKind, string> = {
@@ -105,6 +106,10 @@ export function GameScreen({
         </div>
 
         <div className="pointer-events-auto flex flex-col items-center gap-2">
+          <VirtualJoystick
+            onDirection={(dir) => engineRef.current?.setDir(dir)}
+            onRelease={() => engineRef.current?.clearDir()}
+          />
           <button
             type="button"
             disabled={!hud?.hintReady}
